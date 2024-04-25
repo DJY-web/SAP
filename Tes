@@ -1,0 +1,13 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Mappings:
+  EnvironmentConfig:
+    '123':
+      Value: 'test-dev-te'
+    '456':
+      Value: 'test-tag-te'
+
+Resources:
+  MyResource:
+    Type: AWS::SomeResource
+    Properties:
+      SomeProperty: !FindInMap [EnvironmentConfig, !Ref 'AWS::AccountId', Value]
