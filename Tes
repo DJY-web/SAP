@@ -11,3 +11,18 @@ Resources:
     Type: AWS::SomeResource
     Properties:
       SomeProperty: !FindInMap [EnvironmentConfig, !Ref 'AWS::AccountId', Value]
+
+
+FOR /F "TOKENS=1-4 DELIMS= " %%K IN ('SC QUERY %1 ^| FINDSTR /I "STATE"') DO (
+    SET SVCSTID=%%M
+)
+IF !SVCSTID! EQU 4 (
+    SET RECODE=0
+    CALL :ECHOTEST "OK"
+    EXIT /B !RECODE!
+)
+IF !SVCSTID! NEQ 4 (
+    SET RECODE=8
+    CALL :ECHOTEST "FAIL"
+    EXIT /B !RECODE!
+)
