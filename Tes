@@ -58,9 +58,9 @@ function getIamRoleCredentials() {
     local metadata_url="http://169.254.169.254/latest/meta-data/iam/security-credentials/"
     local iam_role_name=$(curl -s ${metadata_url})
     local credentials=$(curl -s ${metadata_url}${iam_role_name})
-    access_key=$(echo $credentials | jq -r '.AccessKeyId')
-    secret_key=$(echo $credentials | jq -r '.SecretAccessKey')
-    token=$(echo $credentials | jq -r '.Token')
+    access_key=$(echo $credentials | grep -oP '(?<=\"AccessKeyId\" : \").*?(?=\")')
+    secret_key=$(echo $credentials | grep -oP '(?<=\"SecretAccessKey\" : \").*?(?=\")')
+    token=$(echo $credentials | grep -oP '(?<=\"Token\" : \").*?(?=\")')
 }
 
 function sign() {
