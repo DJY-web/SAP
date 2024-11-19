@@ -13,9 +13,6 @@ Resources:
       SomeProperty: !FindInMap [EnvironmentConfig, !Ref 'AWS::AccountId', Value]
 
 #!/bin/bash
-# https://docs.aws.amazon.com/ja_jp/AmazonRDS/latest/UserGuide/USER_LogAccess.html
-# https://docs.aws.amazon.com/ja_jp/general/latest/gr/signature-version-4.html
-
 # ========== 初期化 ==========
 while [ $# -gt 0 ]; do
     case $1 in
@@ -42,68 +39,74 @@ while [ $# -gt 0 ]; do
 done
 
 # Assume defaults
-iam_role="test092"
 rds_id=${rds_id:=test092}
 logfilename=${logfilename:=general/mysql-general.log}
 outputfile=${outputfile:=$(pwd)/mysql-general.log}
 region=${region:=ap-northeast-1}
 
 # Set constants
-service=rds
-metadata_url=http://169.254.169.254/latest/meta-data/iam/security-credentials/${iam_role}
-LF="__LF__"
-ALGORITHM=AWS4-HMAC-SHA256
-host=${service}.${region}.amazonaws.com
+service="rds"
+host="rds.${region}.amazonaws.com"
 endpoint="https://${host}"
+ALGORITHM="AWS4-HMAC-SHA256"
+datadate=$(date -u +%Y%m%d)
+amzdate=$(date -u +%Y%m%dT%H%M%SZ)
+scope="${datadate}/${region}/${service}/aws4_request"
 
 # ========== 関数 ==========
+function getIamRoleCredentials() {
+    local metadata_url="http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+    local iam_role_name=$(curl -s ${metadata_url})
+    local credentials=$(curl -s ${metadata_url}${iam_role_name})
+    access_key=$(echo $credentials | jq -r '.AccessKeyId')
+    secret_key=$(echo $credentials | jq -r '.SecretAccessKey')
+    token=$(echo $credentials | jq -r '.Token')
+}
+
+function sign() {
+    local key=$1
+    local data=$2
+    echo -n "$data" | openssl dgst -sha256 -hmac "$key" -binary
+}
+
+function getSignatureKey() {
+    local secret=$1
+    local date=$2
+    local region=$3
+    local service=$4
+    kDate=$(sign "AWS4${secret}" "$date" | xxd -p -c 256)
+    kRegion=$(sign "$kDate" "$region" | xxd -p -c 256)
+    kService=$(sign "$kRegion" "$service" | xxd -p -c 256)
+    kSigning=$(sign "$kService" "aws4_request" | xxd -p -c 256)
+    echo $kSigning
+}
+
 function downloadRDSLog() {
     local logfilename=$1
-    # ========== Step 0: Get IAM role credentials ==========
-    a=$(curl -s $metadata_url | grep -e AccessKeyId -e SecretAccessKey -e Token)
-    access_key=$(echo $a | perl -pe 's/.*"AccessKeyId" *: *"([^"]+)".*/$1/')
-    secret_key=$(echo $a | perl -pe 's/.*"SecretAccessKey" *: *"([^"]+)".*/$1/')
-    token=$(echo $a | perl -pe 's/.*"Token" *: *"([^"]+)".*/$1/')
-    if [ -z "$access_key" -o -z "$secret_key" -o -z "$token" ]; then
-        echo "Security credentials not available" >&2
-        curl $metadata_url >&2
-        exit 1
-    fi
-    
-    ## リクエスト関連パラメータ設定
-    request_path="/v13/downloadCompleteLogFile/${rds_id}/${logfilename}"
-    amzdate=$(date -u +%Y%m%dT%H%M%SZ)
-    datestamp=$(date -u +%Y%m%d)
+    local request_path="/v13/downloadCompleteLogFile/${rds_id}/${logfilename}"
+    local payload_hash=$(echo -n "" | openssl dgst -sha256 | awk '{print $2}')
 
-    # ========== Step 1: 正規リクエストの生成 ==========
-    header="host:${host}${LF}x-amz-date:${amzdate}${LF}x-amz-security-token:${token}${LF}"
-    signed_headers="host;x-amz-date;x-amz-security-token"
-    request_param=""
-    payload_hash=$(printf "" | openssl dgst -sha256 | awk '{print$2}')
-    canonical_request="GET${LF}${request_path}${LF}${request_param}${LF}${header}${LF}${signed_headers}${LF}${payload_hash}"
+    # Create canonical request
+    local canonical_request="GET\n${request_path}\n\nhost:${host}\nx-amz-date:${amzdate}\nx-amz-security-token:${token}\n\nhost;x-amz-date;x-amz-security-token\n${payload_hash}"
 
-    # ========== Step 2: 署名対象文字列生成 =========
-    scope="${datestamp}/${region}/${service}/aws4_request"
-    dgst=$(printf "$canonical_request" | perl -pe 's/__LF__/\n/g' | openssl dgst -sha256 | awk '{print$2}')
-    str_2B_signed="${ALGORITHM}${LF}${amzdate}${LF}${scope}${LF}${dgst}"
+    # Create string to sign
+    local string_to_sign="${ALGORITHM}\n${amzdate}\n${scope}\n$(echo -n "$canonical_request" | openssl dgst -sha256 | awk '{print $2}')"
 
-    # ========== Step3: 署名生成 ==========
-    ## 署名用鍵生成
-    kDate=$(printf "$datestamp" | openssl dgst -sha256 -hmac "AWS4${secret_key}" -binary | xxd -p -c 256)
-    kRegion=$(printf "$region" | openssl dgst -sha256 -hmac "$kDate" -binary | xxd -p -c 256)
-    kService=$(printf "$service" | openssl dgst -sha256 -hmac "$kRegion" -binary | xxd -p -c 256)
-    sigkey=$(printf "aws4_request" | openssl dgst -sha256 -hmac "$kService" -binary | xxd -p -c 256)
-    signature=$(printf "$str_2B_signed" | perl -pe 's/__LF__/\n/g' | openssl dgst -sha256 -hmac "$sigkey" | awk '{print$2}')
+    # Calculate the signature
+    local signing_key=$(getSignatureKey "$secret_key" "$datadate" "$region" "$service")
+    local signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -mac HMAC -macopt hexkey:$signing_key | awk '{print $2}')
 
-    # ========== Step 4: 署名をリクエストに付与してリクエスト発行 ==========
-    auth_header="${ALGORITHM} Credential=${access_key}/${scope}, SignedHeaders=${signed_headers}, Signature=${signature}"
+    # Create authorization header
+    local authorization_header="${ALGORITHM} Credential=${access_key}/${scope}, SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=${signature}"
+
+    # Make the request
     curl -s \
-    -H "host: ${host}" \
-    -H "Accept: text/plain" \
-    -H "x-amz-security-token: ${token}" \
-    -H "x-amz-date: ${amzdate}" \
-    -H "Authorization: ${auth_header}" \
-    "${endpoint}${request_path}" >> $outputfile
+        -H "host: ${host}" \
+        -H "x-amz-date: ${amzdate}" \
+        -H "x-amz-security-token: ${token}" \
+        -H "Authorization: ${authorization_header}" \
+        "${endpoint}${request_path}" >> $outputfile
+
     if [ $? -ne 0 ]; then
         echo "Download error" >&2
         exit 1
@@ -111,27 +114,29 @@ function downloadRDSLog() {
 }
 
 # ========== 主処理 ==========
-## File initialization
+# Get IAM role credentials
+getIamRoleCredentials
+
+# Initialize output file
 > $outputfile
 if [ $? -ne 0 ]; then
     echo "File access error (${outputfile})" >&2
     exit 1
 fi
 
-## Get list of log files
+# Get list of log files
 logfiles=$(aws rds describe-db-log-files --db-instance-identifier $rds_id --filename-contains $logfilename --query "DescribeDBLogFiles[*].[LogFileName]" --output text | sort)
 if [ $? -ne 0 ]; then
     echo "Log list not available" >&2
     exit 1
 fi
 
-## Download logs
+# Download logs
 for logfile in $logfiles; do
     echo "Downloading $logfile"
     downloadRDSLog $logfile
 done
 
-aws rds describe-db-log-files --db-instance-identifier test092 --output text
 
 
 
