@@ -35,11 +35,26 @@ service="rds"
 host="rds.${region}.amazonaws.com"
 endpoint="https://${host}"
 ALGORITHM="AWS4-HMAC-SHA256"
-datadate=$(date -u +%Y%m%d)
-amzdate=$(date -u +%Y%m%dT%H%M%SZ)
-scope="${datadate}/${region}/${service}/aws4_request"
 
 # ========== 関数 ==========
+
+function urlencode() {
+    local string="${1}"
+    local strlen=${#string}
+    local encoded=""
+    local pos c o
+
+    for (( pos=0 ; pos<strlen ; pos++ )); do
+        c=${string:$pos:1}
+        case "$c" in
+            [-_.~a-zA-Z0-9] ) o="${c}" ;;
+            * )               printf -v o '%%%02X' "'$c"
+        esac
+        encoded+="${o}"
+    done
+    echo "${encoded}"
+}
+
 function getIamRoleCredentials() {
     local metadata_url="http://169.254.169.254/latest/meta-data/iam/security-credentials/"
     local iam_role_name=$(curl -s ${metadata_url})
@@ -69,8 +84,15 @@ function getSignatureKey() {
 
 function downloadRDSLog() {
     local logfilename=$1
-    local request_path="/v13/downloadCompleteLogFile/${rds_id}/${logfilename}"
+    local encoded_logfilename=$(urlencode "${logfilename}")
+    local encoded_rds_id=$(urlencode "${rds_id}")
+    local request_path="/v13/downloadCompleteLogFile/${encoded_rds_id}/${encoded_logfilename}"
     local payload_hash=$(echo -n "" | openssl dgst -sha256 | awk '{print $2}')
+
+    # Update dates
+    local amzdate=$(date -u +%Y%m%dT%H%M%SZ)
+    local datadate=$(date -u +%Y%m%d)
+    local scope="${datadate}/${region}/${service}/aws4_request"
 
     # Create canonical request
     local canonical_request="GET\n${request_path}\n\nhost:${host}\nx-amz-date:${amzdate}\nx-amz-security-token:${token}\n\nhost;x-amz-date;x-amz-security-token\n${payload_hash}"
@@ -84,7 +106,7 @@ function downloadRDSLog() {
 
     # Calculate the signature
     local signing_key=$(getSignatureKey "$secret_key" "$datadate" "$region" "$service")
-    local signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$signing_key" | awk '{print $2}')
+    local signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -mac HMAC -macopt key:"$signing_key" | awk '{print $2}')
 
     echo "Signature: $signature" # Debug
 
@@ -117,7 +139,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # Get list of log files
-logfiles=$(aws rds describe-db-log-files --db-instance-identifier $rds_id --filename-contains $logfilename --query "DescribeDBLogFiles[*].[LogFileName]" --output text | sort)
+logfiles=$(aws rds describe-db-log-files --db-instance-identifier $rds_id --filename-contains $logfilename --query "DescribeDBLogFiles[*].[LogFileName]" --output text --region $region | sort)
 if [ $? -ne 0 ]; then
     echo "Log list not available" >&2
     exit 1
@@ -126,5 +148,5 @@ fi
 # Download logs
 for logfile in $logfiles; do
     echo "Downloading $logfile"
-    downloadRDSLog $logfile
+    downloadRDSLog "$logfile"
 done
