@@ -58,15 +58,15 @@ function getIamRoleCredentials() {
     local metadata_url="http://169.254.169.254/latest/meta-data/iam/security-credentials/"
     local iam_role_name=$(curl -s ${metadata_url})
     local credentials=$(curl -s ${metadata_url}${iam_role_name})
-    access_key=$(echo $credentials | grep -oP '(?<=\"AccessKeyId\" : \").*?(?=\")')
-    secret_key=$(echo $credentials | grep -oP '(?<=\"SecretAccessKey\" : \").*?(?=\")')
-    token=$(echo $credentials | grep -oP '(?<=\"Token\" : \").*?(?=\")')
+    access_key=$(echo $credentials | grep -oP '(?<="AccessKeyId" : ").*?(?=")')
+    secret_key=$(echo $credentials | grep -oP '(?<="SecretAccessKey" : ").*?(?=")')
+    token=$(echo $credentials | grep -oP '(?<="Token" : ").*?(?=")')
 }
 
 function sign() {
     local key=$1
     local data=$2
-    echo -n "$data" | openssl dgst -sha256 -hmac "$key" -binary
+    echo -n "$data" | openssl dgst -sha256 -hmac "$key" -binary | base64
 }
 
 function getSignatureKey() {
@@ -74,10 +74,10 @@ function getSignatureKey() {
     local date=$2
     local region=$3
     local service=$4
-    kDate=$(sign "AWS4${secret}" "$date" | xxd -p -c 256)
-    kRegion=$(sign "$kDate" "$region" | xxd -p -c 256)
-    kService=$(sign "$kRegion" "$service" | xxd -p -c 256)
-    kSigning=$(sign "$kService" "aws4_request" | xxd -p -c 256)
+    kDate=$(sign "AWS4${secret}" "$date")
+    kRegion=$(sign "$kDate" "$region")
+    kService=$(sign "$kRegion" "$service")
+    kSigning=$(sign "$kService" "aws4_request")
     echo $kSigning
 }
 
@@ -94,7 +94,7 @@ function downloadRDSLog() {
 
     # Calculate the signature
     local signing_key=$(getSignatureKey "$secret_key" "$datadate" "$region" "$service")
-    local signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -mac HMAC -macopt hexkey:$signing_key | awk '{print $2}')
+    local signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -mac HMAC -macopt key:$signing_key | awk '{print $2}')
 
     # Create authorization header
     local authorization_header="${ALGORITHM} Credential=${access_key}/${scope}, SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=${signature}"
@@ -136,6 +136,7 @@ for logfile in $logfiles; do
     echo "Downloading $logfile"
     downloadRDSLog $logfile
 done
+
 
 
 
