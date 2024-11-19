@@ -66,7 +66,7 @@ function getIamRoleCredentials() {
 function sign() {
     local key=$1
     local data=$2
-    echo -n "$data" | openssl dgst -sha256 -hmac "$key" -binary | base64
+    echo -n "$data" | openssl dgst -sha256 -hmac "$key" -binary
 }
 
 function getSignatureKey() {
@@ -75,10 +75,10 @@ function getSignatureKey() {
     local region=$3
     local service=$4
     kDate=$(sign "AWS4${secret}" "$date")
-    kRegion=$(sign "$kDate" "$region")
-    kService=$(sign "$kRegion" "$service")
-    kSigning=$(sign "$kService" "aws4_request")
-    echo $kSigning
+    kRegion=$(echo -n "$region" | openssl dgst -sha256 -hmac "$kDate" -binary)
+    kService=$(echo -n "$service" | openssl dgst -sha256 -hmac "$kRegion" -binary)
+    kSigning=$(echo -n "aws4_request" | openssl dgst -sha256 -hmac "$kService" -binary)
+    echo "$kSigning"
 }
 
 function downloadRDSLog() {
@@ -94,7 +94,7 @@ function downloadRDSLog() {
 
     # Calculate the signature
     local signing_key=$(getSignatureKey "$secret_key" "$datadate" "$region" "$service")
-    local signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -mac HMAC -macopt key:$signing_key | awk '{print $2}')
+    local signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$signing_key" | awk '{print $2}')
 
     # Create authorization header
     local authorization_header="${ALGORITHM} Credential=${access_key}/${scope}, SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=${signature}"
