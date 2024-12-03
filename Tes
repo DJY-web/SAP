@@ -37,3 +37,7 @@ foreach ($drive in $drives) {
         exit 1
     }
 }
+
+
+        $errors = ($output -split "`n") | Where-Object { $_ -match "Error" -and $_ -notmatch "Error reading file 1117" }
+        if ($errors.Length -gt 0) {
