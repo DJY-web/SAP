@@ -1,162 +1,39 @@
-#!/bin/bash
-# ========== Initialization ==========
-while [ $# -gt 0 ]; do
-    case $1 in
-        "-region")
-            shift
-            region=$1
-            shift;;
-        "-rds")
-            shift 
-            rds_id=$1
-            shift;;
-        "-out")
-            shift
-            outputfile=$1
-            shift;;
-        "-file")
-            shift
-            logfilename=$1
-            shift;;
-        *)
-            echo "Usage: $(basename $0) -region AWS_REGION -rds RDS_IDENTIFIER -file FILENAME_PATTERN_TO_BE_DOWNLOADED -out OUTPUT_FILE" >&2
-            exit 1;;
-    esac
-done
+$testPath = Get-Location
+$logFile = "$testPath\dd_log.txt"
+$ddPath = "$testPath\dd\dd.exe"
 
-# Default values
-rds_id=${rds_id:=test123}
-logfilename=${logfilename:=error/mysql-error.log}
-outputfile=${outputfile:=$(pwd)/mysql-general.log}
-region=${region:=ap-northeast-1}
+# Get all physical drives using wmic
+$drives = (Get-WmiObject -Query "SELECT DeviceID FROM Win32_DiskDrive").DeviceID
 
-# Constants
-service="rds"
-host="rds.${region}.amazonaws.com"
-endpoint="https://${host}"
-ALGORITHM="AWS4-HMAC-SHA256"
+# Iterate through each physical drive for processing
+foreach ($drive in $drives) {
+    try {
+        # Execute dd command for each drive
+        $command = "& `"$ddPath`" if=`"$drive`" of=/dev/null bs=1M --progress"
+        Add-Content -Path $logFile -Value "Running: $command"
 
-# ========== Functions ==========
+        # Execute the command and capture output
+        $output = & $ddPath if="$drive" of=/dev/null bs=1M --progress 2>&1
 
-# URL Encoding Function
-function urlencode() {
-    local string="${1}"
-    local strlen=${#string}
-    local encoded=""
-    local pos c o
+        # Log the output
+        if ($output) {
+            Add-Content -Path $logFile -Value $output
+        }
 
-    for (( pos=0 ; pos<strlen ; pos++ )); do
-        c=${string:$pos:1}
-        case "$c" in
-            [-_.~a-zA-Z0-9] ) o="${c}" ;;
-            * )               printf -v o '%%%02X' "'$c"
-        esac
-        encoded+="${o}"
-    done
-    echo "${encoded}"
-}
-
-# Get IAM Role Credentials
-function getIamRoleCredentials() {
-    local metadata_url="http://169.254.169.254/latest/meta-data/iam/security-credentials/"
-    local iam_role_name=$(curl -s ${metadata_url})
-    local credentials=$(curl -s ${metadata_url}${iam_role_name})
-
-    access_key=$(echo "$credentials" | awk -F'"' '/AccessKeyId/ {print $4}')
-    secret_key=$(echo "$credentials" | awk -F'"' '/SecretAccessKey/ {print $4}')
-    token=$(echo "$credentials" | awk -F'"' '/Token/ {print $4}')
-}
-
-# Signing Function (Modified)
-function sign() {
-    local key=$1
-    local data=$2
-    echo -n "$data" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$key" | sed 's/^.* //'
-}
-
-# Get Signature Key (Modified)
-function getSignatureKey() {
-    local secret=$1
-    local date=$2
-    local region=$3
-    local service=$4
-
-    # Convert the key to hexadecimal
-    local kSecret=$(echo -n "AWS4${secret}" | xxd -p -c 256)
-
-    local kDate=$(sign "$kSecret" "$date")
-    local kRegion=$(sign "$kDate" "$region")
-    local kService=$(sign "$kRegion" "$service")
-    local kSigning=$(sign "$kService" "aws4_request")
-    echo "$kSigning"
-}
-
-# Download RDS Logs
-function downloadRDSLog() {
-    local logfilename=$1
-    local encoded_logfilename=$(urlencode "${logfilename}")
-    local encoded_rds_id=$(urlencode "${rds_id}")
-    local request_path="/v13/downloadCompleteLogFile/${encoded_rds_id}/${encoded_logfilename}"
-    local payload_hash=$(echo -n "" | openssl dgst -sha256 | awk '{print $2}')
-
-    # Update dates
-    local amzdate=$(date -u +%Y%m%dT%H%M%SZ)
-    local datadate=$(date -u +%Y%m%d)
-    local scope="${datadate}/${region}/${service}/aws4_request"
-
-    # Create Canonical Request
-    local canonical_request="GET\n${request_path}\n\nhost:${host}\nx-amz-date:${amzdate}\nx-amz-security-token:${token}\n\nhost;x-amz-date;x-amz-security-token\n${payload_hash}"
-
-    echo "Canonical Request: $canonical_request" # Debug
-
-    # Create String to Sign
-    local string_to_sign="${ALGORITHM}\n${amzdate}\n${scope}\n$(echo -n "$canonical_request" | openssl dgst -sha256 | awk '{print $2}')"
-
-    echo "String to Sign: $string_to_sign" # Debug
-
-    # Calculate Signature
-    local signing_key=$(getSignatureKey "$secret_key" "$datadate" "$region" "$service")
-    local signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$signing_key" | sed 's/^.* //')
-
-    echo "Signature: $signature" # Debug
-
-    # Create Authorization Header
-    local authorization_header="${ALGORITHM} Credential=${access_key}/${scope}, SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=${signature}"
-
-    # Send Request
-    curl -s \
-        -H "host: ${host}" \
-        -H "x-amz-date: ${amzdate}" \
-        -H "x-amz-security-token: ${token}" \
-        -H "Authorization: ${authorization_header}" \
-        "${endpoint}${request_path}" >> $outputfile
-
-    if [ $? -ne 0 ]; then
-        echo "Download Error" >&2
+        # Check for errors in the output explicitly
+        if ($output -match "Error reading file 1117") {
+            Add-Content -Path $logFile -Value "Non-critical error occurred: $output"
+        } elseif ($output -match "Error") {
+            Add-Content -Path $logFile -Value "Error occurred during execution: $output"
+            # Throw error to stop further execution immediately
+            throw "Critical error encountered. Stopping execution."
+        } else {
+            Add-Content -Path $logFile -Value "Execution completed successfully for drive: $drive"
+        }
+    } catch {
+        # Log any errors to the log file
+        Add-Content -Path $logFile -Value "Error processing drive ${drive}: $($_.Exception.Message)"
+        # Exit immediately with an error code
         exit 1
-    fi
+    }
 }
-
-# ========== Main Program ==========
-# Get IAM Role Credentials
-getIamRoleCredentials
-
-# Initialize Output File
-> $outputfile
-if [ $? -ne 0 ]; then
-    echo "File Access Error (${outputfile})" >&2
-    exit 1
-fi
-
-# Get Log File List
-logfiles=$(aws rds describe-db-log-files --db-instance-identifier $rds_id --filename-contains $logfilename --query "DescribeDBLogFiles[*].[LogFileName]" --output text --region $region | sort)
-if [ $? -ne 0 ]; then
-    echo "Unable to Get Log List" >&2
-    exit 1
-fi
-
-# Download Logs
-for logfile in $logfiles; do
-    echo "Downloading $logfile"
-    downloadRDSLog "$logfile"
-done
