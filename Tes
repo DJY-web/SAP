@@ -2,5 +2,4 @@
         if ($output -notmatch "Error") {
             Add-Content -Path $logFile -Value "`nExecution completed successfully for drive: $($drive.FullName)"
         }
-
-continue
+$output = $output -replace "Error reading file 1117", "reading file 1117"
