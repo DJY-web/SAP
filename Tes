@@ -1,1 +1,4 @@
 += "`nError 555"
+        if ($output -notmatch "Error") {
+            Add-Content -Path $logFile -Value "`nExecution completed successfully for drive: $($drive.FullName)"
+        }
